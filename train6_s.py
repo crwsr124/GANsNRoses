@@ -20,7 +20,7 @@ import kornia.augmentation as K
 import kornia
 import lpips
 
-from model import *
+from model_cr import *
 from dataset import ImageFolder
 from distributed import (
     get_rank,
