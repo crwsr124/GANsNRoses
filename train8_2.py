@@ -274,10 +274,11 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
         A_bg, _ = G_B2A.decode(a_c, input_B2A_style)
         B_bg = B_bg.detach()
         A_bg = A_bg.detach()
-        if i % 3 == 0:
-            fake_A2B = fake_A2B*fake_A2B_alpha + (1.0-fake_A2B_alpha)*(B_bg)
-            fake_B2A = fake_B2A*fake_B2A_alpha + (1.0-fake_B2A_alpha)*(A_bg)
-
+        if i % 2 == 0:
+            fake_A2B_detach = fake_A2B.detach()
+            fake_B2A_detach = fake_B2A.detach()
+            fake_A2B = fake_A2B_detach*fake_A2B_alpha + (1.0-fake_A2B_alpha)*(B_bg)
+            fake_B2A = fake_B2A_detach*fake_B2A_alpha + (1.0-fake_B2A_alpha)*(A_bg)
 
         # train disc
         # aug_A_smooth = bilateralFilter(aug_A, 15, 0.15, 5)
@@ -354,7 +355,7 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
         #                         F.l1_loss(fake_B2A2B*fake_B2A2B_alphakk, B*fake_B2A2B_alphakk))
         lpips_loss = 20*lpips_loss10 + 10*(lpips_fn(fake_A2B2A, A).mean() + lpips_fn(fake_B2A2B, B).mean())
 
-        if i % 3 == 0:
+        if i % 2 == 0:
             fake_Abg, alphaAg = G_B2A.decode(B2A2B_content, a_s)
             fake_Bbg, alphaBg = G_A2B.decode(A2B2A_content, b_s)
             # fake_A2B2A_alpha = fake_A2B2A_alpha + 1
@@ -363,12 +364,12 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
             lpips_loss2 = (F.l1_loss(fake_A2B2A*fake_A2B2A_alpha, A*fake_A2B2A_alpha) +\
                                 F.l1_loss(fake_B2A2B*fake_B2A2B_alpha, B*fake_B2A2B_alpha))
 
-            B_bg2A, _ = G_B2A.decode(b_c, A2B_style)
-            A_bg2B, _ = G_A2B.decode(a_c, B2A_style)
-            B_bg2A = B_bg2A.detach()
-            A_bg2B = A_bg2B.detach()
-            A_replace_bg = fake_A2B2A_alpha * A + (1.0-fake_A2B2A_alpha)*(B_bg2A)
-            B_replace_bg = fake_B2A2B_alpha * B + (1.0-fake_B2A2B_alpha)*(A_bg2B)
+            # B_bg2A, _ = G_B2A.decode(b_c, A2B_style)
+            # A_bg2B, _ = G_A2B.decode(a_c, B2A_style)
+            # B_bg2A = B_bg2A.detach()
+            # A_bg2B = A_bg2B.detach()
+            # A_replace_bg = fake_A2B2A_alpha * A + (1.0-fake_A2B2A_alpha)*(B_bg2A)
+            # B_replace_bg = fake_B2A2B_alpha * B + (1.0-fake_B2A2B_alpha)*(A_bg2B)
             
             lpips_loss = 20*lpips_loss1 + 10*lpips_loss2 #+ 10*(lpips_fn(fake_A2B2A, A_replace_bg).mean() + lpips_fn(fake_B2A2B, B_replace_bg).mean())
         
@@ -403,7 +404,7 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
         # kk1 = 1 + i/300000.0 * 3
         cf_loss = 20 * (F.l1_loss(A2B2A_content, A2B_content) +\
                             F.l1_loss(B2A2B_content, B2A_content))
-        if i % 3 == 0:
+        if i % 2 == 0:
             cf_loss = 0
 
         # identity loss
@@ -423,12 +424,14 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
         # ci_loss = cf_loss_p
         ci_loss = cf_loss_p + 1.0 * (lpips_fn(fake_A2A, A).mean() + lpips_fn(fake_B2B, B).mean())
         # ci_loss = 0
-        if i % 3 == 0:
+        if i % 2 == 0:
             c_alpha_loss = 1.0 * (F.l1_loss(fake_A2B_alpha, alpha2) +\
                     F.l1_loss(fake_B2A_alpha, alpha1))
             ci_loss = c_alpha_loss + ci_loss
 
         G_loss =  G_adv_loss + ci_loss + cf_loss + c_adv_loss  + G_con_loss + lpips_loss + G_style_loss
+        if i % 2 == 0:
+            G_loss = G_loss * 0.5
 
         loss_dict['G_adv'] = G_adv_loss
         loss_dict['G_con'] = G_con_loss
