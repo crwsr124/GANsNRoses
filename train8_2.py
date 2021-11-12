@@ -281,8 +281,8 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
             fake_B2A = fake_B2A_detach*fake_B2A_alpha + (1.0-fake_B2A_alpha)*(A_bg)
 
         # train disc
-        # aug_A_smooth = bilateralFilter(aug_A, 15, 0.15, 5)
-        real_A_logit = D_A(aug_A)
+        aug_A_smooth = bilateralFilter(aug_A, 15, 0.15, 5)
+        real_A_logit = D_A(aug_A_smooth)
         real_B_logit = D_B(aug_B)
         real_L_logit1 = D_L(rand_A2B_style)
         real_L_logit2 = D_L(rand_B2A_style)
@@ -341,19 +341,23 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
         # fake_B2AA = G_B2A.decode(B2A_content, B2A2B_style)
         # fake_A2BB = G_A2B.decode(A2B_content, A2B2A_style)
         
-        # A_smooth = bilateralFilter(A, 15, 0.15, 5)
+        A_smooth = bilateralFilter(A, 15, 0.15, 5)
         #G_cycle_loss = 0 * (F.mse_loss(fake_A2B2A, A) + F.mse_loss(fake_B2A2B, B))
         G_cycle_loss = 0
+        # A_downsample = F.avg_pool2d(A_smooth, kernel_size=4, stride=4)
+        # fake_A2B2A_downsample = F.avg_pool2d(fake_A2B2A, kernel_size=4, stride=4)
+        # B_downsample = F.avg_pool2d(B, kernel_size=4, stride=4)
+        # fake_B2A2B_downsample = F.avg_pool2d(fake_B2A2B, kernel_size=4, stride=4)
 
         # fake_A2B2A = fake_A2B2A*fake_A2B2A_alpha + (1.0-fake_A2B2A_alpha)*A_smooth
         # fake_B2A2B = fake_B2A2B*fake_B2A2B_alpha + (1.0-fake_B2A2B_alpha)*B
-        lpips_loss10 = (F.l1_loss(fake_A2B2A, A) +\
+        lpips_loss10 = (F.l1_loss(fake_A2B2A, A_smooth) +\
                             F.l1_loss(fake_B2A2B, B))
         # fake_A2B2A_alphakk = (fake_A2B2A_alpha + 2.0)/2.0
         # fake_B2A2B_alphakk = (fake_B2A2B_alpha + 2.0)/2.0
         # lpips_loss10 = (F.l1_loss(fake_A2B2A*fake_A2B2A_alphakk, A*fake_A2B2A_alphakk) +\
         #                         F.l1_loss(fake_B2A2B*fake_B2A2B_alphakk, B*fake_B2A2B_alphakk))
-        lpips_loss = 20*lpips_loss10 + 10*(lpips_fn(fake_A2B2A, A).mean() + lpips_fn(fake_B2A2B, B).mean())
+        lpips_loss = 30*lpips_loss10 + 15*(lpips_fn(fake_A2B2A, A_smooth).mean() + lpips_fn(fake_B2A2B, B).mean())
 
         if i % 2 == 0:
             fake_Abg, alphaAg = G_B2A.decode(B2A2B_content, a_s)
@@ -361,7 +365,7 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
             # fake_A2B2A_alpha = fake_A2B2A_alpha + 1
             lpips_loss1 = (F.l1_loss(fake_Abg*(1-alphaAg), A_bg*(1-alphaAg)) +\
                                 F.l1_loss(fake_Bbg*(1-alphaBg), B_bg*(1-alphaBg)))
-            lpips_loss2 = (F.l1_loss(fake_A2B2A*fake_A2B2A_alpha, A*fake_A2B2A_alpha) +\
+            lpips_loss2 = (F.l1_loss(fake_A2B2A*fake_A2B2A_alpha, A_smooth*fake_A2B2A_alpha) +\
                                 F.l1_loss(fake_B2A2B*fake_B2A2B_alpha, B*fake_B2A2B_alpha))
 
             # B_bg2A, _ = G_B2A.decode(b_c, A2B_style)
@@ -371,7 +375,7 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
             # A_replace_bg = fake_A2B2A_alpha * A + (1.0-fake_A2B2A_alpha)*(B_bg2A)
             # B_replace_bg = fake_B2A2B_alpha * B + (1.0-fake_B2A2B_alpha)*(A_bg2B)
             
-            lpips_loss = 20*lpips_loss1 + 10*lpips_loss2 #+ 10*(lpips_fn(fake_A2B2A, A_replace_bg).mean() + lpips_fn(fake_B2A2B, B_replace_bg).mean())
+            lpips_loss = 40*lpips_loss1 + 20*lpips_loss2 #+ 10*(lpips_fn(fake_A2B2A, A_replace_bg).mean() + lpips_fn(fake_B2A2B, B_replace_bg).mean())
         
 
         # lpips_loss1 = (F.l1_loss(fake_B2AA, fake_B2A) +\
@@ -419,10 +423,10 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
         # alpha2 = (alpha2 + 2.0)/2.0
         # cf_loss_p = 2.0 * (F.l1_loss(fake_A2A*alpha2, A*alpha2) +\
         #                     F.l1_loss(fake_B2B*alpha1, B*alpha1))
-        cf_loss_p = 2.0 * (F.l1_loss(fake_A2A, A) +\
+        cf_loss_p = 2.0 * (F.l1_loss(fake_A2A, A_smooth) +\
                             F.l1_loss(fake_B2B, B))
         # ci_loss = cf_loss_p
-        ci_loss = cf_loss_p + 1.0 * (lpips_fn(fake_A2A, A).mean() + lpips_fn(fake_B2B, B).mean())
+        ci_loss = cf_loss_p + 1.0 * (lpips_fn(fake_A2A, A_smooth).mean() + lpips_fn(fake_B2B, B).mean())
         # ci_loss = 0
         if i % 2 == 0:
             c_alpha_loss = 1.0 * (F.l1_loss(fake_A2B_alpha, alpha2) +\
