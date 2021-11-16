@@ -635,7 +635,7 @@ class DecoderAlpha(nn.Module):
         # print(image)
         # alpha = self.to_alpha(skip[:,3:4,:,:])
         # alpha = self.to_alpha((skip[:,3:4,:,:]*0.5))
-        alpha = torch.clamp(skip[:,3:4,:,:]+0.5, 0.0, 1.0)
+        alpha = torch.clamp(0.1*skip[:,3:4,:,:]+0.5, 0.0, 1.0)
         # print(alpha)
         # print(image)
         return image, alpha

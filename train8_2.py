@@ -107,15 +107,19 @@ def test(args, genA2B, genB2A, testA_loader, testB_loader, name, step, A_bg, B_b
                 A2B_mod2 = torch.randn([1, args.latent_dim]).cuda()
                 B2A_mod2 = torch.randn([1, args.latent_dim]).cuda()
 
-            b_c, b_s = G_B2A.encode(real_B)
-            fake_B2B, alpha = G_A2B.decode(b_c, b_s)
             a_c, a_s = G_A2B.encode(real_A)
-            fake_A2A, alpha = G_B2A.decode(a_c, a_s)
+            fake_A2A, alphaA2A = G_B2A.decode(a_c, a_s)
+            b_c, b_s = G_B2A.encode(real_B)
+            fake_B2B, alphaB2B = G_A2B.decode(b_c, b_s)
             # fake_B2B, _, _ = genA2B(real_B)
             # fake_A2A, _, _ = genB2A(real_A)
 
             colsA = [real_A, fake_A2A]
+            alphaA2A = alphaA2A.repeat(1, 3, 1, 1)
+            colsA.append(alphaA2A)
             colsB = [real_B, fake_B2B]
+            alphaB2B = alphaB2B.repeat(1, 3, 1, 1)
+            colsB.append(alphaB2B)
             
             fake_A2B_1, alpha = genA2B.decode(A2B_content, A2B_mod1)
             fake_B2A_1, alpha = genB2A.decode(B2A_content, B2A_mod1)
@@ -148,10 +152,10 @@ def test(args, genA2B, genB2A, testA_loader, testB_loader, name, step, A_bg, B_b
             colsA.append(fake_A2B2A)
             colsB.append(fake_B2A2B)
 
-            fake_A2B2A, _,  _, alpha = genB2A(fake_A2B_2, A2B_style)
-            fake_B2A2B, _,  _, alpha = genA2B(fake_B2A_2, B2A_style)
-            colsA.append(fake_A2B2A)
-            colsB.append(fake_B2A2B)
+            # fake_A2B2A, _,  _, alpha = genB2A(fake_A2B_2, A2B_style)
+            # fake_B2A2B, _,  _, alpha = genA2B(fake_B2A_2, B2A_style)
+            # colsA.append(fake_A2B2A)
+            # colsB.append(fake_B2A2B)
 
             fake_A2B2A, _, _, alpha = genB2A(fake_A2B_1, B2A_mod1)
             fake_B2A2B, _, _, alpha = genA2B(fake_B2A_1, A2B_mod1)
@@ -362,7 +366,6 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
         if i % 2 == 0:
             fake_Abg, alphaAg = G_B2A.decode(B2A2B_content, a_s)
             fake_Bbg, alphaBg = G_A2B.decode(A2B2A_content, b_s)
-            # fake_A2B2A_alpha = fake_A2B2A_alpha + 1
             lpips_loss1 = (F.l1_loss(fake_Abg*(1-alphaAg), A_bg*(1-alphaAg)) +\
                                 F.l1_loss(fake_Bbg*(1-alphaBg), B_bg*(1-alphaBg)))
             lpips_loss2 = (F.l1_loss(fake_A2B2A*fake_A2B2A_alpha, A_smooth*fake_A2B2A_alpha) +\
@@ -376,7 +379,7 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
             # B_replace_bg = fake_B2A2B_alpha * B + (1.0-fake_B2A2B_alpha)*(A_bg2B)
             
             lpips_loss = 40*lpips_loss1 + 20*lpips_loss2 #+ 10*(lpips_fn(fake_A2B2A, A_replace_bg).mean() + lpips_fn(fake_B2A2B, B_replace_bg).mean())
-        
+            # lpips_loss = 0
 
         # lpips_loss1 = (F.l1_loss(fake_B2AA, fake_B2A) +\
         #                     F.l1_loss(fake_A2BB, fake_A2B))
@@ -392,7 +395,9 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
 
 
         # style reconstruction
-        G_style_loss = 5 * (smooth_l1(A2B2A_style, input_A2B_style) +\
+        # G_style_loss = 5 * (smooth_l1(A2B2A_style, input_A2B_style) +\
+        #                     smooth_l1(B2A2B_style, input_B2A_style))
+        G_style_loss = 10 * (smooth_l1(A2B2A_style, input_A2B_style) +\
                             smooth_l1(B2A2B_style, input_B2A_style))
         # G_style_loss = 0
 
@@ -429,8 +434,11 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
         ci_loss = cf_loss_p + 1.0 * (lpips_fn(fake_A2A, A_smooth).mean() + lpips_fn(fake_B2B, B).mean())
         # ci_loss = 0
         if i % 2 == 0:
+            #alpha_delta = torch.clamp(alpha2 - fake_A2B_alpha, 0, 1) #+ torch.clamp(fake_B2A_alpha - alpha1, 0, 1)
+            #c_alpha_loss = 0.001*alpha_delta.sum()
             c_alpha_loss = 1.0 * (F.l1_loss(fake_A2B_alpha, alpha2) +\
                     F.l1_loss(fake_B2A_alpha, alpha1))
+            # c_alpha_loss = 0
             ci_loss = c_alpha_loss + ci_loss
 
         G_loss =  G_adv_loss + ci_loss + cf_loss + c_adv_loss  + G_con_loss + lpips_loss + G_style_loss
@@ -462,8 +470,8 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
         #G_cycle_loss_val = loss_reduced['G_cycle'].mean().item()
         G_con_loss_val = loss_reduced['G_con'].mean().item()
         G_cycle_loss_val = 0
-        # lpips_val = 0
-        lpips_val = loss_reduced['lpips'].mean().item()
+        lpips_val = 0
+        # lpips_val = loss_reduced['lpips'].mean().item()
         ci_loss_val = 0
         # ci_loss_val = loss_reduced['ci_loss'].mean().item()
         # cf_loss_val = loss_reduced['cf_loss'].mean().item()
@@ -509,7 +517,7 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--iter', type=int, default=400000)
+    parser.add_argument('--iter', type=int, default=600000)
     parser.add_argument('--batch', type=int, default=4)
     parser.add_argument('--n_sample', type=int, default=64)
     parser.add_argument('--size', type=int, default=256)
@@ -570,7 +578,7 @@ if __name__ == '__main__':
         lr=args.lr, betas=(0**d_reg_ratio, 0.99**d_reg_ratio))
 
     if args.ckpt is not None:
-        ckpt = torch.load("/data/cairui/GANsNRoses/results7_18_6/checkpoint/ck.pt", map_location=lambda storage, loc: storage)
+        ckpt = torch.load("/data/cairui/CRGANsNRoses/GANsNRoses/results4/checkpoint/ck.pt", map_location=lambda storage, loc: storage)
         try:
             ckpt_name = os.path.basename(args.ckpt)
             args.start_iter = int(os.path.splitext(ckpt_name)[0])
@@ -702,7 +710,7 @@ if __name__ == '__main__':
 
     train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B, G_B2A, D_A, D_B, G_optim, D_optim, device, trainA_bg_loader, trainB_bg_loader)
     # with torch.no_grad():
-    #    test(args, G_A2B, G_B2A, testA_loader, testB_loader, 'normal', 338)
+    #    test(args, G_A2B, G_B2A, testA_loader, testB_loader, 'normal', 444444, trainA_bg_loader, trainB_bg_loader)
 
 
 
