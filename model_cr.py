@@ -14,6 +14,7 @@ n_latent = 11
 
 # from crnet_small import CRDecoder_rose3, Decoder_kkk, Decoder_kkk2
 # from mobilenetv3 import MobileNetV3_Mogai
+from DiffAugment import DiffAugment
 
 
 channels = {
@@ -1023,6 +1024,11 @@ class Discriminator(nn.Module):
         return convs
 
     def forward(self, x):
+        # print("ssssss1", x.shape)
+        x = DiffAugment(x, policy='color,translation,cutout')
+        # x = DiffAugment(x, policy='translation,cutout')
+        # print("ssssss2", x.shape)
+        
         l_adv = self.l_branch(x)
 
         g_act = self.g_branch(x)

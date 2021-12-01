@@ -194,6 +194,10 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
     mean_path_length_A2B = 0
     mean_path_length_B2A = 0
 
+    path_loss = torch.tensor(0.0, device=device)
+    path_lengths = torch.tensor(0.0, device=device)
+    mean_path_length = 0
+
     if args.distributed:
         G_A2B_module = G_A2B.module
         G_B2A_module = G_B2A.module
@@ -236,19 +240,45 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
 
         ori_A = ori_A.to(device)
         ori_B = ori_B.to(device)
-        A_bg = A_bg.to(device)
-        B_bg = B_bg.to(device)
-        aug_A = augA(ori_A)
-        aug_B = augB(ori_B)
-        A = augA(ori_A[[np.random.randint(args.batch)]].expand_as(ori_A))
-        B = augB(ori_B[[np.random.randint(args.batch)]].expand_as(ori_B))
+        A_bg = augA2(A_bg.to(device))
+        B_bg = augB2(B_bg.to(device))
+        aug_A = augA2(ori_A)
+        # aug_A_smooth = bilateralFilter(aug_A, 15, 0.15, 5).detach()
+        aug_B = augB2(ori_B)
+        # aug_A = DiffAugment(ori_A, policy='color,translation,cutout')
+        # aug_B = DiffAugment(ori_B, policy='color,translation,cutout')
+        # A = augA(ori_A[[np.random.randint(args.batch)]].expand_as(ori_A))
+        # B = augB(ori_B[[np.random.randint(args.batch)]].expand_as(ori_B))
+        # A = augA(ori_A)
+        # B = augB(ori_B)
+        # A = ori_A
+        # B = ori_B
+
+        batch_id = np.random.randint(args.batch)
+        single_A_batch = ori_A[[batch_id]].expand_as(ori_A)
+        single_B_batch = ori_B[[batch_id]].expand_as(ori_B)
+        # single_A_batch = ori_A[[batch_id]].expand(ori_A.shape[0]+1, ori_A.shape[1], ori_A.shape[2], ori_A.shape[3])
+        # single_B_batch = ori_B[[batch_id]].expand(ori_B.shape[0]+1, ori_B.shape[1], ori_B.shape[2], ori_B.shape[3])
+        A = augA3(single_A_batch)
+        A[1] = torch.flip(A[0],[2])
+        B = augB3(single_B_batch)
+        B[1] = torch.flip(B[0],[2])
+
+        # A = augA2(ori_A)
+        # B = augB2(ori_B)  
 
         if i % args.d_reg_every == 0:
             aug_A.requires_grad = True
             aug_B.requires_grad = True
+        # if i % args.d_reg_every == 0:
+        #     A.requires_grad = True
+        #     B.requires_grad = True
         
         A2B_content, A2B_style = G_A2B.encode(A)
         B2A_content, B2A_style = G_B2A.encode(B)
+
+        A_aug_style = G_A2B.style_encode(augA(single_A_batch))
+        B_aug_style = G_B2A.style_encode(augB(single_B_batch))
 
         # get new style
         aug_A2B_style = G_B2A.style_encode(aug_B)
@@ -256,6 +286,7 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
         rand_A2B_style = torch.randn([args.batch, args.latent_dim]).to(device).requires_grad_()
         rand_B2A_style = torch.randn([args.batch, args.latent_dim]).to(device).requires_grad_()
         #print(rand_A2B_style.shape)
+
 
         # styles
         idx = torch.randperm(2*args.batch)
@@ -279,20 +310,27 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
         B_bg = B_bg.detach()
         A_bg = A_bg.detach()
         if i % 2 == 0:
+            A_bg[1] = torch.flip(A_bg[0],[2])
+            B_bg[1] = torch.flip(B_bg[0],[2])
             fake_A2B_detach = fake_A2B.detach()
             fake_B2A_detach = fake_B2A.detach()
             fake_A2B = fake_A2B_detach*fake_A2B_alpha + (1.0-fake_A2B_alpha)*(B_bg)
             fake_B2A = fake_B2A_detach*fake_B2A_alpha + (1.0-fake_B2A_alpha)*(A_bg)
 
         # train disc
-        aug_A_smooth = bilateralFilter(aug_A, 15, 0.15, 5)
-        real_A_logit = D_A(aug_A_smooth)
+        # aug_A_smooth = bilateralFilter(aug_A, 15, 0.15, 5)
+        real_A_logit = D_A(aug_A)
         real_B_logit = D_B(aug_B)
+        # A_smooth = bilateralFilter(A, 15, 0.15, 5)
+        # real_A_logit = D_A(A_smooth)
+        # real_B_logit = D_B(B)
         real_L_logit1 = D_L(rand_A2B_style)
         real_L_logit2 = D_L(rand_B2A_style)
 
         fake_B_logit = D_B(fake_A2B.detach())
         fake_A_logit = D_A(fake_B2A.detach())
+        # fake_B_logit = D_B(DiffAugment(fake_A2B.detach(), policy='color,translation,cutout'))
+        # fake_A_logit = D_A(DiffAugment(fake_B2A.detach(), policy='color,translation,cutout'))
         fake_L_logit1 = D_L(aug_A2B_style.detach())
         fake_L_logit2 = D_L(aug_B2A_style.detach())
 
@@ -305,6 +343,8 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
         loss_dict['D_adv'] = D_loss
 
         if i % args.d_reg_every == 0:
+            # r1_A_loss = d_r1_loss(real_A_logit, A)
+            # r1_B_loss = d_r1_loss(real_B_logit, B)
             r1_A_loss = d_r1_loss(real_A_logit, aug_A)
             r1_B_loss = d_r1_loss(real_B_logit, aug_B)
             r1_L_loss = d_r1_loss(real_L_logit1, rand_A2B_style) + d_r1_loss(real_L_logit2, rand_B2A_style)
@@ -320,6 +360,8 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
         # adv loss
         fake_B_logit = D_B(fake_A2B)
         fake_A_logit = D_A(fake_B2A)
+        # fake_B_logit = D_B(DiffAugment(fake_A2B, policy='color,translation,cutout'))
+        # fake_A_logit = D_A(DiffAugment(fake_B2A, policy='color,translation,cutout'))
         fake_L_logit1 = D_L(aug_A2B_style)
         fake_L_logit2 = D_L(aug_B2A_style)
 
@@ -339,8 +381,12 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
         B2A2B_content, B2A2B_style = G_A2B.encode(fake_B2A)
         # fake_A2B2A = G_B2A.decode(A2B2A_content, shuffle_batch(A2B_style))
         # fake_B2A2B = G_A2B.decode(B2A2B_content, shuffle_batch(B2A_style))
-        fake_A2B2A, fake_A2B2A_alpha = G_B2A.decode(A2B2A_content, A2B_style)
-        fake_B2A2B, fake_B2A2B_alpha = G_A2B.decode(B2A2B_content, B2A_style)
+        fake_A2B2A, fake_A2B2A_alpha = G_B2A.decode(A2B2A_content, shuffle_batch(A_aug_style))
+        fake_B2A2B, fake_B2A2B_alpha = G_A2B.decode(B2A2B_content, shuffle_batch(B_aug_style))
+        # fake_A2B2A, fake_A2B2A_alpha = G_B2A.decode(A2B2A_content, A2B_style)
+        # fake_B2A2B, fake_B2A2B_alpha = G_A2B.decode(B2A2B_content, B2A_style)
+        # fake_A2B2A, fake_A2B2A_alpha = G_B2A.decode(A2B2A_content, aug_B2A_style)
+        # fake_B2A2B, fake_B2A2B_alpha = G_A2B.decode(B2A2B_content, aug_A2B_style)
 
         # fake_B2AA = G_B2A.decode(B2A_content, B2A2B_style)
         # fake_A2BB = G_A2B.decode(A2B_content, A2B2A_style)
@@ -355,17 +401,44 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
 
         # fake_A2B2A = fake_A2B2A*fake_A2B2A_alpha + (1.0-fake_A2B2A_alpha)*A_smooth
         # fake_B2A2B = fake_B2A2B*fake_B2A2B_alpha + (1.0-fake_B2A2B_alpha)*B
+
         lpips_loss10 = (F.l1_loss(fake_A2B2A, A_smooth) +\
                             F.l1_loss(fake_B2A2B, B))
+        # lpips_loss10 = (F.l1_loss(F.avg_pool2d(fake_A2B2A, kernel_size=4, stride=4), F.avg_pool2d(A_smooth, kernel_size=4, stride=4)) +\
+        #                     F.l1_loss(F.avg_pool2d(fake_B2A2B, kernel_size=4, stride=4), F.avg_pool2d(B, kernel_size=4, stride=4)))
         # fake_A2B2A_alphakk = (fake_A2B2A_alpha + 2.0)/2.0
         # fake_B2A2B_alphakk = (fake_B2A2B_alpha + 2.0)/2.0
         # lpips_loss10 = (F.l1_loss(fake_A2B2A*fake_A2B2A_alphakk, A*fake_A2B2A_alphakk) +\
         #                         F.l1_loss(fake_B2A2B*fake_B2A2B_alphakk, B*fake_B2A2B_alphakk))
         lpips_loss = 30*lpips_loss10 + 15*(lpips_fn(fake_A2B2A, A_smooth).mean() + lpips_fn(fake_B2A2B, B).mean())
 
+        # lpips_loss = 120*lpips_loss10 + 60*(lpips_fn(F.avg_pool2d(fake_A2B2A, kernel_size=4, stride=4), F.avg_pool2d(A_smooth, kernel_size=4, stride=4)).mean() +\
+        #      lpips_fn(F.avg_pool2d(fake_B2A2B, kernel_size=4, stride=4), F.avg_pool2d(B, kernel_size=4, stride=4)).mean())
+
         if i % 2 == 0:
             fake_Abg, alphaAg = G_B2A.decode(B2A2B_content, a_s)
             fake_Bbg, alphaBg = G_A2B.decode(A2B2A_content, b_s)
+
+            # fake_Abg = F.avg_pool2d(fake_Abg, kernel_size=4, stride=4)
+            # alphaAg = F.avg_pool2d(alphaAg, kernel_size=4, stride=4)
+            # fake_Bbg = F.avg_pool2d(fake_Bbg, kernel_size=4, stride=4)
+            # alphaBg = F.avg_pool2d(alphaBg, kernel_size=4, stride=4)
+
+            # A_bg_s = F.avg_pool2d(A_bg, kernel_size=4, stride=4)
+            # B_bg_s = F.avg_pool2d(B_bg, kernel_size=4, stride=4)
+
+            # fake_A2B2A = F.avg_pool2d(fake_A2B2A, kernel_size=4, stride=4)
+            # fake_B2A2B = F.avg_pool2d(fake_B2A2B, kernel_size=4, stride=4)
+            # A_smooth_s = F.avg_pool2d(A_smooth, kernel_size=4, stride=4)
+            # B_s = F.avg_pool2d(B, kernel_size=4, stride=4)
+            # fake_A2B2A_alpha = F.avg_pool2d(fake_A2B2A_alpha, kernel_size=4, stride=4)
+            # fake_B2A2B_alpha = F.avg_pool2d(fake_B2A2B_alpha, kernel_size=4, stride=4)
+
+            # lpips_loss1 = (F.l1_loss(fake_Abg*(1-alphaAg), A_bg_s*(1-alphaAg)) +\
+            #                     F.l1_loss(fake_Bbg*(1-alphaBg), B_bg_s*(1-alphaBg)))
+            # lpips_loss2 = (F.l1_loss(fake_A2B2A*fake_A2B2A_alpha, A_smooth_s*fake_A2B2A_alpha) +\
+            #                     F.l1_loss(fake_B2A2B*fake_B2A2B_alpha, B_s*fake_B2A2B_alpha))
+
             lpips_loss1 = (F.l1_loss(fake_Abg*(1-alphaAg), A_bg*(1-alphaAg)) +\
                                 F.l1_loss(fake_Bbg*(1-alphaBg), B_bg*(1-alphaBg)))
             lpips_loss2 = (F.l1_loss(fake_A2B2A*fake_A2B2A_alpha, A_smooth*fake_A2B2A_alpha) +\
@@ -379,6 +452,7 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
             # B_replace_bg = fake_B2A2B_alpha * B + (1.0-fake_B2A2B_alpha)*(A_bg2B)
             
             lpips_loss = 40*lpips_loss1 + 20*lpips_loss2 #+ 10*(lpips_fn(fake_A2B2A, A_replace_bg).mean() + lpips_fn(fake_B2A2B, B_replace_bg).mean())
+            #lpips_loss = 160*lpips_loss1 + 80*lpips_loss2
             # lpips_loss = 0
 
         # lpips_loss1 = (F.l1_loss(fake_B2AA, fake_B2A) +\
@@ -392,13 +466,20 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
         #lpips_loss = 10 * (lpips_fn(fake_A2B2A_downsample.mean(1), A_downsample.mean(1)).mean() + lpips_fn(fake_B2A2B_downsample.mean(1), B_downsample.mean(1)).mean()) #10 for anime
         # lpips_loss = 0
 
-
+        flip_loss = 5.0 * (F.l1_loss(fake_A2B[0], torch.flip(fake_A2B[1],[2])) + F.l1_loss(fake_B2A[0], torch.flip(fake_B2A[1],[2])))
+                    # 1.0 * (F.l1_loss(fake_A2B_alpha[0], torch.flip(fake_A2B_alpha[1],[2])) + F.l1_loss(fake_B2A_alpha[0], torch.flip(fake_B2A_alpha[1],[2])))
 
         # style reconstruction
         # G_style_loss = 5 * (smooth_l1(A2B2A_style, input_A2B_style) +\
         #                     smooth_l1(B2A2B_style, input_B2A_style))
+        # style_loss1 = 5 * (smooth_l1(A2B_style, aug_B2A_style) +\
+        #                     smooth_l1(B2A_style, aug_A2B_style))
+
+        style_loss2 = 5 * (smooth_l1(A2B_style, A_aug_style) +\
+                            smooth_l1(B2A_style, B_aug_style))
+        
         G_style_loss = 10 * (smooth_l1(A2B2A_style, input_A2B_style) +\
-                            smooth_l1(B2A2B_style, input_B2A_style))
+                            smooth_l1(B2A2B_style, input_B2A_style)) + style_loss2
         # G_style_loss = 0
 
         # crloss
@@ -411,8 +492,12 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
 
         # feature presering loss
         # kk1 = 1 + i/300000.0 * 3
-        cf_loss = 20 * (F.l1_loss(A2B2A_content, A2B_content) +\
+        # cf_loss = 20 * (F.l1_loss(A2B2A_content, A2B_content) +\
+        #                     F.l1_loss(B2A2B_content, B2A_content))
+
+        cf_loss = 2 * (F.l1_loss(A2B2A_content, A2B_content) +\
                             F.l1_loss(B2A2B_content, B2A_content))
+
         if i % 2 == 0:
             cf_loss = 0
 
@@ -431,7 +516,7 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
         cf_loss_p = 2.0 * (F.l1_loss(fake_A2A, A_smooth) +\
                             F.l1_loss(fake_B2B, B))
         # ci_loss = cf_loss_p
-        ci_loss = cf_loss_p + 1.0 * (lpips_fn(fake_A2A, A_smooth).mean() + lpips_fn(fake_B2B, B).mean())
+        ci_loss = cf_loss_p #+ 1.0 * (lpips_fn(fake_A2A, A_smooth).mean() + lpips_fn(fake_B2B, B).mean())
         # ci_loss = 0
         if i % 2 == 0:
             #alpha_delta = torch.clamp(alpha2 - fake_A2B_alpha, 0, 1) #+ torch.clamp(fake_B2A_alpha - alpha1, 0, 1)
@@ -439,9 +524,9 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
             c_alpha_loss = 1.0 * (F.l1_loss(fake_A2B_alpha, alpha2) +\
                     F.l1_loss(fake_B2A_alpha, alpha1))
             # c_alpha_loss = 0
-            ci_loss = c_alpha_loss + ci_loss
+            ci_loss = c_alpha_loss #+ ci_loss
 
-        G_loss =  G_adv_loss + ci_loss + cf_loss + c_adv_loss  + G_con_loss + lpips_loss + G_style_loss
+        G_loss =  G_adv_loss + ci_loss + cf_loss + c_adv_loss  + G_con_loss + lpips_loss + G_style_loss + flip_loss
         if i % 2 == 0:
             G_loss = G_loss * 0.5
 
@@ -456,6 +541,35 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
         G_optim.zero_grad()
         G_loss.backward()
         G_optim.step()
+
+        # g_regularize = i % args.g_reg_every == 0
+        # if g_regularize:
+        #     # path_batch_size = max(1, args.batch // args.path_batch_shrink)
+        #     rand_A2B_style = torch.randn([args.batch, args.latent_dim]).to(device).requires_grad_()
+        #     fake_img, _ = G_A2B.decode(A2B_content.detach(), rand_A2B_style)
+
+        #     path_loss, mean_path_length, path_lengths = g_path_regularize(
+        #         fake_img, rand_A2B_style, mean_path_length
+        #     )
+
+        #     # G_A2B.decoder.zero_grad()
+        #     G_A2B.encoder.eval(), G_B2A.eval()
+        #     G_optim.zero_grad()
+        #     weighted_path_loss = args.path_regularize * args.g_reg_every * path_loss
+
+        #     # if args.path_batch_shrink:
+        #     #     weighted_path_loss += 0 * fake_img[0, 0, 0, 0]
+
+        #     weighted_path_loss.backward()
+
+        #     G_optim.step()
+
+            # mean_path_length_avg = (
+            #     reduce_sum(mean_path_length).item() / get_world_size()
+            # )
+            # if i % 50 == 0:
+            #     print("path_loss: %.8f, mean_path_length_avg: %.8f, path_lengths: %.8f" % \
+            #         (path_loss, mean_path_length_avg, path_lengths))
 
         G_scheduler.step()
         D_scheduler.step()
@@ -523,7 +637,7 @@ if __name__ == '__main__':
     parser.add_argument('--size', type=int, default=256)
     parser.add_argument('--r1', type=float, default=10)
     parser.add_argument('--lambda_cycle', type=int, default=1)
-    parser.add_argument('--path_regularize', type=float, default=2)
+    parser.add_argument('--path_regularize', type=float, default=1)
     parser.add_argument('--path_batch_shrink', type=int, default=2)
     parser.add_argument('--d_reg_every', type=int, default=15)
     parser.add_argument('--g_reg_every', type=int, default=4)
@@ -578,7 +692,7 @@ if __name__ == '__main__':
         lr=args.lr, betas=(0**d_reg_ratio, 0.99**d_reg_ratio))
 
     if args.ckpt is not None:
-        ckpt = torch.load("/data/cairui/CRGANsNRoses/GANsNRoses/results4/checkpoint/ck.pt", map_location=lambda storage, loc: storage)
+        ckpt = torch.load("/data/cairui/CRGANsNRoses/GANsNRoses/results11/checkpoint/ck.pt", map_location=lambda storage, loc: storage)
         try:
             ckpt_name = os.path.basename(args.ckpt)
             args.start_iter = int(os.path.splitext(ckpt_name)[0])
@@ -674,6 +788,34 @@ if __name__ == '__main__':
         kornia.geometry.transform.Resize(256+54),
         K.RandomCrop((256,256)),
         K.RandomHorizontalFlip(),
+    )
+
+    augB2 = nn.Sequential(
+        # K.RandomAffine(degrees=(-20,20), scale=(0.8, 1.2), translate=(0.1, 0.1), shear=0.15),
+        kornia.geometry.transform.Resize(256+10),
+        K.RandomCrop((256,256)),
+        K.RandomHorizontalFlip(),
+    )
+
+    augA2 = nn.Sequential(
+        # K.RandomAffine(degrees=(-20,20), scale=(0.8, 1.2), translate=(0.1, 0.1), shear=0.15),
+        kornia.geometry.transform.Resize(256+54),
+        K.RandomCrop((256,256)),
+        K.RandomHorizontalFlip(),
+    )
+
+    augB3 = nn.Sequential(
+        # K.RandomAffine(degrees=(-20,20), scale=(0.8, 1.2), translate=(0.1, 0.1), shear=0.15),
+        kornia.geometry.transform.Resize(256+10),
+        K.RandomCrop((256,256)),
+        # K.RandomHorizontalFlip(),
+    )
+
+    augA3 = nn.Sequential(
+        # K.RandomAffine(degrees=(-20,20), scale=(0.8, 1.2), translate=(0.1, 0.1), shear=0.15),
+        kornia.geometry.transform.Resize(256+54),
+        K.RandomCrop((256,256)),
+        # K.RandomHorizontalFlip(),
     )
 
 
