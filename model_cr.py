@@ -12,8 +12,9 @@ from torch.autograd import Function
 from op import FusedLeakyReLU, fused_leaky_relu, upfirdn2d
 n_latent = 11
 
-# from crnet_small import CRDecoder_rose3, Decoder_kkk, Decoder_kkk2
-# from mobilenetv3 import MobileNetV3_Mogai
+from crnet_small import CRDecoder_rose3, Decoder_kkk, Decoder_kkk2, Decoder_kkk512
+from mobilenetv3 import MobileNetV3_Mogai
+
 from DiffAugment import DiffAugment
 
 
@@ -737,52 +738,53 @@ class Generator2_alpha(nn.Module):
 
         return out, content, style, alpha
 
-# class Generator3(nn.Module):
-#     def __init__(
-#         self,
-#         size,
-#         num_down,
-#         latent_dim,
-#         n_mlp,
-#         n_res,
-#         channel_multiplier=1,
-#         blur_kernel=[1, 3, 3, 1],
-#         lr_mlp=0.01,
-#     ):
-#         super().__init__()
-#         self.size = size
+class Generator3(nn.Module):
+    def __init__(
+        self,
+        size,
+        num_down,
+        latent_dim,
+        n_mlp,
+        n_res,
+        channel_multiplier=1,
+        blur_kernel=[1, 3, 3, 1],
+        lr_mlp=0.01,
+    ):
+        super().__init__()
+        self.size = size
 
-#         style_dim = 512
+        style_dim = 512
 
-#         mapping = [EqualLinear(latent_dim, style_dim, lr_mul=lr_mlp, activation='fused_lrelu')]
-#         for i in range(n_mlp-1):
-#             mapping.append(EqualLinear(style_dim, style_dim, lr_mul=lr_mlp, activation='fused_lrelu'))
+        mapping = [EqualLinear(latent_dim, style_dim, lr_mul=lr_mlp, activation='fused_lrelu')]
+        for i in range(n_mlp-1):
+            mapping.append(EqualLinear(style_dim, style_dim, lr_mul=lr_mlp, activation='fused_lrelu'))
 
-#         self.mapping = nn.Sequential(*mapping)
+        self.mapping = nn.Sequential(*mapping)
 
-#         #self.encoder = Encoder(size, latent_dim, num_down, n_res, channel_multiplier)
-#         self.encoder = MobileNetV3_Mogai()
+        #self.encoder = Encoder(size, latent_dim, num_down, n_res, channel_multiplier)
+        self.encoder = MobileNetV3_Mogai()
 
-#         self.decoder = Decoder_kkk2()
+        # self.decoder = Decoder_kkk2()
+        self.decoder = Decoder_kkk512()
 
-#     def style_encode(self, input):
-#         return self.encoder(input)[1]
+    def style_encode(self, input):
+        return self.encoder(input)[1]
 
-#     def encode(self, input):
-#         return self.encoder(input)
+    def encode(self, input):
+        return self.encoder(input)
 
-#     def decode(self, input, styles, use_mapping=True):
-#         image, alpha = self.decoder(input, styles)
-#         return image
+    def decode(self, input, styles, use_mapping=True):
+        image, alpha, image512 = self.decoder(input, styles)
+        return image, alpha, image512
 
-#     def forward(self, input, z=None):
-#         content, style = self.encode(input)
-#         if z is None:
-#             out = self.decode(content, style)
-#         else:
-#             out = self.decode(content, z)
+    def forward(self, input, z=None):
+        content, style = self.encode(input)
+        if z is None:
+            out = self.decode(content, style)
+        else:
+            out = self.decode(content, z)
 
-#         return out, content, style
+        return out, content, style
 
 class Generator(nn.Module):
     def __init__(
@@ -1008,6 +1010,54 @@ class Discriminator(nn.Module):
                       )
         self.g_final = EqualLinear(128, 1, activation=False)
 
+    def make_net_(self, out_size):
+        size = self.size
+        convs = [ConvLayer(3, channels[size], 1)]
+        log_size = int(math.log(size, 2))
+        out_log_size = int(math.log(out_size, 2))
+        in_channel = channels[size]
+
+        for i in range(log_size, out_log_size, -1):
+            out_channel = channels[2 ** (i - 1)]
+            convs.append(ResBlock(in_channel, out_channel))
+            in_channel = out_channel
+
+        return convs
+
+    def forward(self, x):
+        # print("ssssss1", x.shape)
+        # x = DiffAugment(x, policy='color,translation,cutout')
+        x = DiffAugment(x, policy='translation,cutout')
+        # print("ssssss2", x.shape)
+        
+        l_adv = self.l_branch(x)
+
+        g_act = self.g_branch(x)
+        g_adv = self.g_adv(g_act)
+
+        output = self.g_std(g_act)
+        g_stddev = torch.sqrt(output.var(0, keepdim=True, unbiased=False) + 1e-8).repeat(x.size(0),1)
+        g_std = self.g_final(g_stddev)
+        return [l_adv, g_adv, g_std]
+
+class Discriminator512(nn.Module):
+    def __init__(self, size, channel_multiplier=2, blur_kernel=[1, 3, 3, 1]):
+        super().__init__()
+        self.size = size
+        l_branch = self.make_net_(32)
+        l_branch += [ConvLayer(channels[32], 1, 1, activate=False)]
+        self.l_branch = nn.Sequential(*l_branch)
+
+
+        g_branch = self.make_net_(8)
+        self.g_branch = nn.Sequential(*g_branch)
+        self.g_adv = ConvLayer(channels[8], 1, 1, activate=False)
+
+        self.g_std = nn.Sequential(ConvLayer(channels[8], channels[4], 3, downsample=True),
+                      nn.Flatten(),
+                      EqualLinear(channels[4] * 4 * 4, 128, activation='fused_lrelu'), 
+                      )
+        self.g_final = EqualLinear(128, 1, activation=False)
 
     def make_net_(self, out_size):
         size = self.size
@@ -1025,7 +1075,58 @@ class Discriminator(nn.Module):
 
     def forward(self, x):
         # print("ssssss1", x.shape)
-        x = DiffAugment(x, policy='color,translation,cutout')
+        # x = DiffAugment(x, policy='color,translation,cutout')
+        x = DiffAugment(x, policy='translation,cutout')
+        # print("ssssss2", x.shape)
+        
+        l_adv = self.l_branch(x)
+
+        g_act = self.g_branch(x)
+        g_adv = self.g_adv(g_act)
+
+        # print("1111", x.shape)
+        # print("1111", g_act.shape)
+        output = self.g_std(g_act)
+        g_stddev = torch.sqrt(output.var(0, keepdim=True, unbiased=False) + 1e-8).repeat(x.size(0),1)
+        g_std = self.g_final(g_stddev)
+        return [l_adv, g_adv, g_std]
+
+class Discriminator2(nn.Module):
+    def __init__(self, size, channel_multiplier=2, blur_kernel=[1, 3, 3, 1]):
+        super().__init__()
+        self.size = size
+        l_branch = self.make_net_2(32)
+        l_branch += [ConvLayer(channels[32], 1, 1, activate=False)]
+        self.l_branch = nn.Sequential(*l_branch)
+
+
+        g_branch = self.make_net_2(8)
+        self.g_branch = nn.Sequential(*g_branch)
+        self.g_adv = ConvLayer(channels[8], 1, 1, activate=False)
+
+        self.g_std = nn.Sequential(ConvLayer(channels[8], channels[4], 3, downsample=True),
+                      nn.Flatten(),
+                      EqualLinear(channels[4] * 4 * 4, 128, activation='fused_lrelu'), 
+                      )
+        self.g_final = EqualLinear(128, 1, activation=False)
+
+    def make_net_2(self, out_size):
+        size = self.size
+        convs = [ConvLayer(6, channels[size], 1)]
+        log_size = int(math.log(size, 2))
+        out_log_size = int(math.log(out_size, 2))
+        in_channel = channels[size]
+
+        for i in range(log_size, out_log_size, -1):
+            out_channel = channels[2 ** (i - 1)]
+            convs.append(ResBlock(in_channel, out_channel))
+            in_channel = out_channel
+
+        return convs
+
+    def forward(self, x):
+        # print("ssssss1", x.shape)
+        # x = DiffAugment(x, policy='color,translation,cutout')
         # x = DiffAugment(x, policy='translation,cutout')
         # print("ssssss2", x.shape)
         
@@ -1038,7 +1139,6 @@ class Discriminator(nn.Module):
         g_stddev = torch.sqrt(output.var(0, keepdim=True, unbiased=False) + 1e-8).repeat(x.size(0),1)
         g_std = self.g_final(g_stddev)
         return [l_adv, g_adv, g_std]
-
 
 
 class Encoder(nn.Module):

@@ -242,8 +242,10 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
         ori_B = ori_B.to(device)
         A_bg = augA2(A_bg.to(device))
         B_bg = augB2(B_bg.to(device))
-        aug_A = augA(ori_A)
+        #aug_A = augA2(ori_A)
         # aug_A_smooth = bilateralFilter(aug_A, 15, 0.15, 5).detach()
+        #aug_B = augB2(ori_B)
+        aug_A = augA(ori_A)
         aug_B = augB(ori_B)
         # aug_A = DiffAugment(ori_A, policy='color,translation,cutout')
         # aug_B = DiffAugment(ori_B, policy='color,translation,cutout')
@@ -259,10 +261,15 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
         single_B_batch = ori_B[[batch_id]].expand_as(ori_B)
         # single_A_batch = ori_A[[batch_id]].expand(ori_A.shape[0]+1, ori_A.shape[1], ori_A.shape[2], ori_A.shape[3])
         # single_B_batch = ori_B[[batch_id]].expand(ori_B.shape[0]+1, ori_B.shape[1], ori_B.shape[2], ori_B.shape[3])
+        #A = augA3(single_A_batch)
         A = augA(single_A_batch)
         A[1] = torch.flip(A[0],[2])
+        # B = augB3(single_B_batch)
         B = augB(single_B_batch)
         B[1] = torch.flip(B[0],[2])
+
+        # A = augA2(ori_A)
+        # B = augB2(ori_B)  
 
         if i % args.d_reg_every == 0:
             aug_A.requires_grad = True
@@ -316,34 +323,16 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
 
         # train disc
         # aug_A_smooth = bilateralFilter(aug_A, 15, 0.15, 5)
-        # real_A_logit = D_A(aug_A)
-        # real_B_logit = D_B(aug_B)
-        aug_A_cc, _ = G_A2B.encode(aug_A)
-        aug_A2B, aug_A2B_alpha = G_A2B.decode(aug_A_cc, rand_A2B_style)
-        aug_B_cc, _ = G_A2B.encode(aug_B)
-        aug_B2A, aug_B2A_alpha = G_A2B.decode(aug_B_cc, aug_B2A_style)
-        if i % 2 == 0:
-            aug_A2B = aug_A2B*aug_A2B_alpha + (1.0-aug_A2B_alpha)*(B_bg)
-            aug_B2A = aug_B2A*aug_B2A_alpha + (1.0-aug_B2A_alpha)*(A_bg)
-        aug_A_merge = torch.cat([aug_A, aug_A2B.detach()], 1)
-        aug_B_merge = torch.cat([aug_B, aug_B2A.detach()], 1)
-
-        real_A_logit = D_A(aug_A_merge)
-        real_B_logit = D_B(aug_B_merge)
+        real_A_logit = D_A(aug_A)
+        real_B_logit = D_B(aug_B)
         # A_smooth = bilateralFilter(A, 15, 0.15, 5)
         # real_A_logit = D_A(A_smooth)
         # real_B_logit = D_B(B)
         real_L_logit1 = D_L(rand_A2B_style)
         real_L_logit2 = D_L(rand_B2A_style)
 
-        # fake_B_logit = D_B(fake_A2B.detach())
-        # fake_A_logit = D_A(fake_B2A.detach())
-        fake_A2B_merge = torch.cat([fake_A2B, A], 1)
-        fake_B2A_merge = torch.cat([fake_B2A, B], 1)
-        fake_B_logit = D_B(fake_A2B_merge.detach())
-        fake_A_logit = D_A(fake_B2A_merge.detach())
-
-
+        fake_B_logit = D_B(fake_A2B.detach())
+        fake_A_logit = D_A(fake_B2A.detach())
         # fake_B_logit = D_B(DiffAugment(fake_A2B.detach(), policy='color,translation,cutout'))
         # fake_A_logit = D_A(DiffAugment(fake_B2A.detach(), policy='color,translation,cutout'))
         fake_L_logit1 = D_L(aug_A2B_style.detach())
@@ -373,10 +362,8 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
 
         #Generator
         # adv loss
-        # fake_B_logit = D_B(fake_A2B)
-        # fake_A_logit = D_A(fake_B2A)
-        fake_B_logit = D_B(fake_A2B_merge)
-        fake_A_logit = D_A(fake_B2A_merge)
+        fake_B_logit = D_B(fake_A2B)
+        fake_A_logit = D_A(fake_B2A)
         # fake_B_logit = D_B(DiffAugment(fake_A2B, policy='color,translation,cutout'))
         # fake_A_logit = D_A(DiffAugment(fake_B2A, policy='color,translation,cutout'))
         fake_L_logit1 = D_L(aug_A2B_style)
@@ -425,7 +412,7 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
         #                     F.l1_loss(F.avg_pool2d(fake_B2A2B, kernel_size=4, stride=4), F.avg_pool2d(B, kernel_size=4, stride=4)))
         # fake_A2B2A_alphakk = (fake_A2B2A_alpha + 2.0)/2.0
         # fake_B2A2B_alphakk = (fake_B2A2B_alpha + 2.0)/2.0
-        # lpips_loss10 = (F.l1_loss(fake_A2B2A*fake_A2B2A_alphakk, A_smooth*fake_A2B2A_alphakk) +\
+        # lpips_loss10 = (F.l1_loss(fake_A2B2A*fake_A2B2A_alphakk, A*fake_A2B2A_alphakk) +\
         #                         F.l1_loss(fake_B2A2B*fake_B2A2B_alphakk, B*fake_B2A2B_alphakk))
         lpips_loss = 30*lpips_loss10 + 15*(lpips_fn(fake_A2B2A, A_smooth).mean() + lpips_fn(fake_B2A2B, B).mean())
 
@@ -458,9 +445,6 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
 
             lpips_loss1 = (F.l1_loss(fake_Abg*(1-alphaAg), A_bg*(1-alphaAg)) +\
                                 F.l1_loss(fake_Bbg*(1-alphaBg), B_bg*(1-alphaBg)))
-            # lpips_loss1 = 0
-            # fake_A2B2A_alphakk = (fake_A2B2A_alpha + 1.0)/2.0
-            # fake_B2A2B_alphakk = (fake_B2A2B_alpha + 1.0)/2.0
             lpips_loss2 = (F.l1_loss(fake_A2B2A*fake_A2B2A_alpha, A_smooth*fake_A2B2A_alpha) +\
                                 F.l1_loss(fake_B2A2B*fake_B2A2B_alpha, B*fake_B2A2B_alpha))
 
@@ -471,9 +455,8 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
             # A_replace_bg = fake_A2B2A_alpha * A + (1.0-fake_A2B2A_alpha)*(B_bg2A)
             # B_replace_bg = fake_B2A2B_alpha * B + (1.0-fake_B2A2B_alpha)*(A_bg2B)
             
-            #lpips_loss = 40*lpips_loss1 + 20*lpips_loss2 #+ 10*(lpips_fn(fake_A2B2A, A_replace_bg).mean() + lpips_fn(fake_B2A2B, B_replace_bg).mean())
+            lpips_loss = 40*lpips_loss1 + 20*lpips_loss2 #+ 10*(lpips_fn(fake_A2B2A, A_replace_bg).mean() + lpips_fn(fake_B2A2B, B_replace_bg).mean())
             #lpips_loss = 160*lpips_loss1 + 80*lpips_loss2
-            lpips_loss = 80*lpips_loss1 + 40*lpips_loss2
             # lpips_loss = 0
 
         # lpips_loss1 = (F.l1_loss(fake_B2AA, fake_B2A) +\
@@ -530,15 +513,15 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
         # A_smooth = bilateralFilter(A, 15, 0.15, 5)
         # kk1 = 1 + i/300000.0 * 3.0
 
-        # alpha1 = (alpha1 + 1.0)/1.0
-        # alpha2 = (alpha2 + 1.0)/1.0
-        # cf_loss_p = 2.0 * (F.l1_loss(fake_A2A*alpha2, A_smooth*alpha2) +\
+        # alpha1 = (alpha1 + 2.0)/2.0
+        # alpha2 = (alpha2 + 2.0)/2.0
+        # cf_loss_p = 2.0 * (F.l1_loss(fake_A2A*alpha2, A*alpha2) +\
         #                     F.l1_loss(fake_B2B*alpha1, B*alpha1))
         cf_loss_p = 2.0 * (F.l1_loss(fake_A2A, A_smooth) +\
                             F.l1_loss(fake_B2B, B))
         # ci_loss = cf_loss_p
         ci_loss = cf_loss_p #+ 1.0 * (lpips_fn(fake_A2A, A_smooth).mean() + lpips_fn(fake_B2B, B).mean())
-        #ci_loss = 0
+        # ci_loss = 0
         if i % 2 == 0:
             #alpha_delta = torch.clamp(alpha2 - fake_A2B_alpha, 0, 1) #+ torch.clamp(fake_B2A_alpha - alpha1, 0, 1)
             #c_alpha_loss = 0.001*alpha_delta.sum()
@@ -549,7 +532,12 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
 
         G_loss =  G_adv_loss + ci_loss + cf_loss + c_adv_loss  + G_con_loss + lpips_loss + G_style_loss + flip_loss
         if i % 2 == 0:
-            G_loss = G_loss * 0.5
+            kkkk = (i-100000)/200000.
+            if kkkk > 1:
+                kkkk = 1
+            if kkkk < 0:
+                kkkk = 0
+            G_loss = G_loss * (0.5+0.5*kkkk)
 
         loss_dict['G_adv'] = G_adv_loss
         loss_dict['G_con'] = G_con_loss
@@ -695,9 +683,9 @@ if __name__ == '__main__':
     args.start_iter = 0
 
     G_A2B = Generator2_alpha( args.size, args.num_down, args.latent_dim, args.n_mlp, lr_mlp=args.lr_mlp, n_res=args.n_res).to(device)
-    D_A = Discriminator2(args.size).to(device)
+    D_A = Discriminator(args.size).to(device)
     G_B2A = Generator2_alpha( args.size, args.num_down, args.latent_dim, args.n_mlp, lr_mlp=args.lr_mlp, n_res=args.n_res).to(device)
-    D_B = Discriminator2(args.size).to(device)
+    D_B = Discriminator(args.size).to(device)
     D_L = LatDiscriminator(args.latent_dim).to(device)
     lpips_fn = lpips.LPIPS(net='vgg').to(device)
 
@@ -806,7 +794,7 @@ if __name__ == '__main__':
 
     augA = nn.Sequential(
         K.RandomAffine(degrees=(-20,20), scale=(0.8, 1.2), translate=(0.1, 0.1), shear=0.15),
-        kornia.geometry.transform.Resize(256+54),
+        kornia.geometry.transform.Resize(256+10),
         K.RandomCrop((256,256)),
         K.RandomHorizontalFlip(),
     )
@@ -820,7 +808,7 @@ if __name__ == '__main__':
 
     augA2 = nn.Sequential(
         # K.RandomAffine(degrees=(-20,20), scale=(0.8, 1.2), translate=(0.1, 0.1), shear=0.15),
-        kornia.geometry.transform.Resize(256+54),
+        kornia.geometry.transform.Resize(256+10),
         K.RandomCrop((256,256)),
         K.RandomHorizontalFlip(),
     )
@@ -834,28 +822,23 @@ if __name__ == '__main__':
 
     augA3 = nn.Sequential(
         # K.RandomAffine(degrees=(-20,20), scale=(0.8, 1.2), translate=(0.1, 0.1), shear=0.15),
-        kornia.geometry.transform.Resize(256+54),
+        kornia.geometry.transform.Resize(256+10),
         K.RandomCrop((256,256)),
         # K.RandomHorizontalFlip(),
     )
 
 
     d_path = args.d_path
-    #trainA = ImageFolder(os.path.join(d_path, 'trainA'), train_transform)
-    #trainB = ImageFolder(os.path.join(d_path, 'trainB'), train_transform)
-    #testA = ImageFolder(os.path.join(d_path, 'testA'), test_transform)
-    #testB = ImageFolder(os.path.join(d_path, 'testB'), test_transform)
-    #trainA = ImageFolder(os.path.join("/data/cairui/UGATIT-pytorch/dataset/selfie2anime", 'trainA'), train_transform)
     
-    trainA = ImageFolder(os.path.join("/data/dataset/kkk", 'kkk'), train_transform)
-    # trainA = ImageFolder(os.path.join("/data/dataset/yellow", 'generated_yellow-stylegan2'), train_transform)
-    trainB = ImageFolder(os.path.join("/data/cairui/UGATIT-pytorch/dataset/selfie2anime", 'trainB'), train_transform)
-    #testA = ImageFolder(os.path.join("/data/cairui/UGATIT-pytorch/dataset/selfie2anime", 'testA2'), test_transform)
+    trainA = ImageFolder(os.path.join("/data/dataset/crdata/CRDATA/", 'A_256'), train_transform)
+    trainB = ImageFolder(os.path.join("/data/dataset/crdata/CRDATA/", 'B_256'), train_transform)
     testB = ImageFolder(os.path.join("/data/cairui/UGATIT-pytorch/dataset/selfie2anime", 'testB'), test_transform)
     testA = ImageFolder(os.path.join("/data/cairui/GANsNRoses/", 'testimg2'), test_transform)
 
+    # trainA_bg = ImageFolder(os.path.join("/data/dataset/crdata/CRDATA/", 'A_256_bg'), train_transform)
+    trainB_bg = ImageFolder(os.path.join("/data/dataset/crdata/CRDATA/", 'B_256_bg'), train_transform)
     trainA_bg = ImageFolder(os.path.join("/data/dataset/kkk_bg", 'kkk_bg'), train_transform)
-    trainB_bg = ImageFolder(os.path.join("/data/dataset/cartoon_bg", 'cartoon_bg'), train_transform)
+    # trainB_bg = ImageFolder(os.path.join("/data/dataset/cartoon_bg", 'cartoon_bg'), train_transform)
 
     trainA_loader = data.DataLoader(trainA, batch_size=args.batch, 
             sampler=data_sampler(trainA, shuffle=True, distributed=args.distributed), drop_last=True, pin_memory=True, num_workers=2)
