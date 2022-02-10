@@ -764,8 +764,8 @@ class Generator3(nn.Module):
         #self.encoder = Encoder(size, latent_dim, num_down, n_res, channel_multiplier)
         self.encoder = MobileNetV3_Mogai()
 
-        # self.decoder = Decoder_kkk2()
-        self.decoder = Decoder_kkk512()
+        self.decoder = Decoder_kkk2()
+        # self.decoder = Decoder_kkk512()
 
     def style_encode(self, input):
         return self.encoder(input)[1]
@@ -773,9 +773,13 @@ class Generator3(nn.Module):
     def encode(self, input):
         return self.encoder(input)
 
+    # def decode(self, input, styles, use_mapping=True):
+    #     image, alpha, image512 = self.decoder(input, styles)
+    #     return image, alpha, image512
+
     def decode(self, input, styles, use_mapping=True):
-        image, alpha, image512 = self.decoder(input, styles)
-        return image, alpha, image512
+        image, alpha = self.decoder(input, styles)
+        return image, alpha
 
     def forward(self, input, z=None):
         content, style = self.encode(input)
@@ -1026,8 +1030,8 @@ class Discriminator(nn.Module):
 
     def forward(self, x):
         # print("ssssss1", x.shape)
-        # x = DiffAugment(x, policy='color,translation,cutout')
-        x = DiffAugment(x, policy='translation,cutout')
+        x = DiffAugment(x, policy='color,translation,cutout')
+        # x = DiffAugment(x, policy='translation,cutout')
         # print("ssssss2", x.shape)
         
         l_adv = self.l_branch(x)

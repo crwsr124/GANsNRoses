@@ -20,6 +20,10 @@ import kornia.augmentation as K
 import kornia
 import lpips
 
+import onnxruntime as rt
+
+from img_process_util import USMSharp
+
 from model_cr import *
 from dataset import ImageFolder
 from distributed import (
@@ -81,9 +85,11 @@ def test(args, genA2B, T_Encoder, T_Decoder, testA_loader, testB_loader, name, s
         genA2B.train()
 
 
-def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B, D_B, G_optim, D_optim, device, T_Decoder, T_Encoder):
+def train(args, trainA_loader, trainA2_loader, trainA3_loader, trainB_loader, testA_loader, testB_loader, G_A2B, D_B, G_optim, D_optim, device, T_Decoder, T_Encoder):
     G_A2B.train(), D_B.train()
     trainA_loader = sample_data(trainA_loader)
+    trainA2_loader = sample_data(trainA2_loader)
+    trainA3_loader = sample_data(trainA3_loader)
     trainB_loader = sample_data(trainB_loader)
     G_scheduler = lr_scheduler.StepLR(G_optim, step_size=100000, gamma=0.5)
     D_scheduler = lr_scheduler.StepLR(D_optim, step_size=100000, gamma=0.5)
@@ -104,6 +110,13 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
     else:
         G_A2B_module = G_A2B
         D_B_module = D_B
+
+    # matting
+    sess = rt.InferenceSession('rvm_mobilenetv3_fp32.onnx')
+    rec = [ np.zeros([1, 1, 1, 1], dtype=np.float32) ] * 4  # Must match dtype of the model.
+    downsample_ratio = np.array([1], dtype=np.float32)
+
+    sharper = USMSharp().cuda()
 
     for idx in pbar:
         i = idx + args.start_iter
@@ -128,6 +141,10 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
             p_i.requires_grad=False
         
         ori_A = next(trainA_loader)
+        if i % 11 == 0 and i % 2 == 0:
+            ori_A = next(trainA2_loader)
+        if i % 11 == 0 and i % 2 == 1:
+            ori_A = next(trainA3_loader)
         ori_B = next(trainB_loader)
         if isinstance(ori_A, list):
             ori_A = ori_A[0]
@@ -143,6 +160,21 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
         A = aug_A
         B = aug_B
 
+        # matting
+        A_denorm = A*0.5+0.5
+        A_denorm = A_denorm.detach().cpu().numpy()
+        A_denorm = A_denorm.astype(np.float32)
+        res_fake = []
+        fir, alpha_ret, *res_fake= sess.run([], {
+            'src': A_denorm, 
+            'r1i': rec[0], 
+            'r2i': rec[1], 
+            'r3i': rec[2], 
+            'r4i': rec[3], 
+            'downsample_ratio': downsample_ratio
+        })
+        rvm_alpha = torch.from_numpy(alpha_ret).float().to(device)
+
         if i % args.d_reg_every == 0:
             aug_A.requires_grad = True
             aug_B.requires_grad = True
@@ -155,6 +187,10 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
         rand_A2B_style = torch.randn([args.batch, args.latent_dim]).to(device).requires_grad_()
         fake_A2B, alpha = G_A2B.decode(A2B_content, rand_A2B_style)
         fake_A2B_t, alpha_t = T_Decoder(A2B_content_t, rand_A2B_style)
+
+        fake_A2B_t = fake_A2B_t*0.5 + 0.5
+        fake_A2B_t = sharper(fake_A2B_t)
+        fake_A2B_t = ((fake_A2B_t-0.5)/0.5).detach()
         
         # train disc
         real_B_logit = D_B(aug_B)
@@ -163,18 +199,20 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
         # global loss
         D_loss = d_logistic_loss(real_B_logit, fake_B_logit)
 
+        
+
+        if i % args.d_reg_every == 0:
+            r1_loss = d_r1_loss(real_B_logit, aug_B)
+            D_r1_loss = (args.r1 / 2 * r1_loss * args.d_reg_every)
+            D_loss += D_r1_loss
+
+        if i > 100000:
+            D_loss = D_loss
+        else:
+            D_loss = 0 * D_loss
+
         loss_dict['D_adv'] = D_loss
 
-        # if i % args.d_reg_every == 0:
-        #     r1_A_loss = d_r1_loss(real_A_logit, aug_A)
-        #     r1_B_loss = d_r1_loss(real_B_logit, aug_B)
-        #     r1_L_loss = d_r1_loss(real_L_logit1, rand_A2B_style) + d_r1_loss(real_L_logit2, rand_B2A_style)
-        #     r1_loss = r1_A_loss + r1_B_loss + r1_L_loss
-        #     D_r1_loss = (args.r1 / 2 * r1_loss * args.d_reg_every)
-        #     D_loss += D_r1_loss
-
-        D_loss = 0.001*D_loss
-        # D_loss = 0
         D_optim.zero_grad()
         D_loss.backward()
         D_optim.step()
@@ -186,7 +224,11 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
         lambda_adv = (1, 1, 1)
         # G_adv_loss = g_nonsaturating_loss(fake_B_logit, lambda_adv)
         G_adv_loss = 1 * g_nonsaturating_loss(fake_B_logit, lambda_adv) 
-        G_adv_loss = 0.001*G_adv_loss
+
+        if i > 100000:
+            G_adv_loss = G_adv_loss
+        else:
+            G_adv_loss = 0 * G_adv_loss
 
         # style consis loss
         G_con_loss = 0
@@ -248,9 +290,12 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
 
         # teacher loss
         #c_tloss = 20*F.l1_loss(fake_A2B, fake_A2B_t)
-        decoder_l11 = 0.01*(20*F.l1_loss(fake_A2B, fake_A2B_t))
-        decoder_lpips1 = 0.01*(10*lpips_fn(fake_A2B, fake_A2B_t).mean())
-        decoder_lalpha = 0.01*(20*F.l1_loss(alpha, alpha_t))
+        kki = 1. + i/300000.0 * 9.0
+        decoder_l11 = kki*(20*F.l1_loss(fake_A2B, fake_A2B_t))
+        decoder_lpips1 = kki*(10*lpips_fn(fake_A2B, fake_A2B_t).mean())
+        # decoder_lalpha = 0.01*(20*F.l1_loss(alpha, alpha_t))
+        decoder_lalpha = 0.01*(20*F.l1_loss(alpha, rvm_alpha))
+        
         # decoder_l12 = (20*F.l1_loss(fake_B2A2B, fake_B2A2B_t))
         # decoder_lpips2 = (lpips_fn(fake_B2A2B, fake_B2A2B_t).mean())
         encoder_c_loss1 = 1000 * smooth_l1(A2B_content, A2B_content_t)
@@ -258,22 +303,19 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
         encoder_s_loss1 = smooth_l1(A2B_style, A2B_style_t)
         #encoder_s_loss2 = smooth_l1(B2A2B_style, B2A2B_style_t)
 
-        if i % 50 == 0:
-            print("decoder_l11: %.8f, decoder_lpips1: %.8f, encoder_c_loss1: %.8f, encoder_s_loss1: %.8f" % \
-                (decoder_l11, decoder_lpips1, encoder_c_loss1, encoder_s_loss1))
-            # print("decoder_l12: %.8f, decoder_lpips2: %.8f, encoder_c_loss2: %.8f, encoder_s_loss2: %.8f" % \
-            #     (decoder_l12, decoder_lpips2, encoder_c_loss2, encoder_s_loss2))
-        #G_loss =  G_adv_loss + ci_loss + cf_loss + c_adv_loss  + G_con_loss + lpips_loss + G_style_loss
-        G_loss = 100*decoder_l11 + 100*decoder_lpips1  + decoder_lalpha + \
+        # if i % 50 == 0:
+        #     print("decoder_l11: %.8f, decoder_lpips1: %.8f, encoder_c_loss1: %.8f, encoder_s_loss1: %.8f" % \
+        #         (decoder_l11, decoder_lpips1, encoder_c_loss1, encoder_s_loss1))
+        
+        G_loss = decoder_l11 + decoder_lpips1  + decoder_lalpha + \
                 encoder_c_loss1 + encoder_s_loss1  + G_adv_loss
 
         loss_dict['G_adv'] = G_adv_loss
-        # loss_dict['G_con'] = G_con_loss
-        # loss_dict['G_cycle'] = G_cycle_loss
-        # loss_dict['lpips'] = lpips_loss
-        # loss_dict['ci_loss'] = ci_loss
-        # loss_dict['cf_loss'] = cf_loss
-        # loss_dict['c_tloss'] = c_tloss1
+        loss_dict['decoder_l11'] = decoder_l11
+        loss_dict['decoder_lpips1'] = decoder_lpips1
+        loss_dict['decoder_lalpha'] = decoder_lalpha
+        loss_dict['encoder_c_loss1'] = encoder_c_loss1
+        loss_dict['encoder_s_loss1'] = encoder_s_loss1
 
         G_optim.zero_grad()
         G_loss.backward()
@@ -287,27 +329,19 @@ def train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B,
 
         loss_reduced = reduce_loss_dict(loss_dict)
         D_adv_loss_val = loss_reduced['D_adv'].mean().item()
-
         G_adv_loss_val = loss_reduced['G_adv'].mean().item()
-        #G_cycle_loss_val = loss_reduced['G_cycle'].mean().item()
-        G_cycle_loss_val = 0.0
-        G_con_loss_val = 0.0
-        # G_con_loss_val = loss_reduced['G_con'].mean().item()
-        
-        lpips_val = 0.0
-        # lpips_val = loss_reduced['lpips'].mean().item()
-        # ci_loss_val = loss_reduced['ci_loss'].mean().item()
-        # cf_loss_val = loss_reduced['cf_loss'].mean().item()
-        # ci_loss_val = 0
-        # cf_loss_val = 0
-        # c_tloss_val = loss_reduced['c_tloss'].mean().item()
-        #c_adv_loss_val = 0
+        decoder_l11_val = loss_reduced['decoder_l11'].mean().item()
+        decoder_lpips1_val = loss_reduced['decoder_lpips1'].mean().item()
+        decoder_lalpha_val = loss_reduced['decoder_lalpha'].mean().item()
+        encoder_c_loss1_val = loss_reduced['encoder_c_loss1'].mean().item()
+        encoder_s_loss1_val = loss_reduced['encoder_s_loss1'].mean().item()
 
         if get_rank() == 0:
             pbar.set_description(
                 (
-                    f'Dadv: {D_adv_loss_val:.2f}; lpips: {lpips_val:.2f}'
-                    f'Gadv: {G_adv_loss_val:.2f}; Gcycle: {G_cycle_loss_val:.2f}; GMS: {G_con_loss_val:.2f}; '
+                    f'Dadv: {D_adv_loss_val:.2f}; G_adv_loss_val: {G_adv_loss_val:.2f}'
+                    f'decoder_l11_val: {decoder_l11_val:.2f}; decoder_lpips1_val: {decoder_lpips1_val:.2f}; decoder_lalpha_val: {decoder_lalpha_val:.2f}; '
+                    f'encoder_c_loss1_val: {encoder_c_loss1_val:.2f}; encoder_s_loss1_val: {encoder_s_loss1_val:.2f}; '
                 )
             )
 
@@ -339,7 +373,7 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--iter', type=int, default=300000)
+    parser.add_argument('--iter', type=int, default=400000)
     parser.add_argument('--batch', type=int, default=4)
     parser.add_argument('--n_sample', type=int, default=64)
     parser.add_argument('--size', type=int, default=256)
@@ -398,8 +432,8 @@ if __name__ == '__main__':
     D_optim = optim.Adam(list(D_B.parameters()), lr=args.lr, betas=(0**d_reg_ratio, 0.99**d_reg_ratio))
 
     if args.ckpt is not None:
-        ckpt = torch.load("/data/cairui/CRGANsNRoses/GANsNRoses/rlight3/checkpoint/ck.pt", map_location=lambda storage, loc: storage)
-        ckpt_teacher = torch.load("/data/cairui/CRGANsNRoses/GANsNRoses/results4/checkpoint/ck.pt", map_location=lambda storage, loc: storage)
+        ckpt = torch.load("/data/cairui/CRGANsNRoses/GANsNRoses/rlight9/checkpoint/ck.pt", map_location=lambda storage, loc: storage)
+        ckpt_teacher = torch.load("/data/cairui/CRGANsNRoses/GANsNRoses/result2/checkpoint/ck.pt", map_location=lambda storage, loc: storage)
 
         try:
             ckpt_name = os.path.basename(args.ckpt)
@@ -410,15 +444,15 @@ if __name__ == '__main__':
             
         G_A2B.encoder.load_state_dict(ckpt['G_A2B_encoder'])
         G_A2B.decoder.load_state_dict(ckpt['G_A2B_decoder'])
-        torch.save(G_A2B.encoder, "/data/cairui/CRGANsNRoses/GANsNRoses/rlight3/checkpoint/encoder.pkl") 
-        torch.save(G_A2B.decoder, "/data/cairui/CRGANsNRoses/GANsNRoses/rlight3/checkpoint/decoder.pkl") 
+        torch.save(G_A2B.encoder, "/data/cairui/CRGANsNRoses/GANsNRoses/rlight9/checkpoint/encoder.pkl") 
+        torch.save(G_A2B.decoder, "/data/cairui/CRGANsNRoses/GANsNRoses/rlight9/checkpoint/decoder.pkl") 
         T_Encoder.load_state_dict(ckpt_teacher['G_A2B_encoder'])
         T_Decoder.load_state_dict(ckpt_teacher['G_A2B_decoder'])
 
-        #G_optim.load_state_dict(ckpt['G_optim'])
+        # G_optim.load_state_dict(ckpt['G_optim'])
         # D_optim.load_state_dict(ckpt['D_optim'])
         # args.start_iter = ckpt2['iter']
-        # args.start_iter = 15000
+        args.start_iter = 100000
 
     if args.distributed:
         G_A2B = nn.parallel.DistributedDataParallel(
@@ -448,25 +482,33 @@ if __name__ == '__main__':
 
     aug = nn.Sequential(
         K.RandomAffine(degrees=(-20,20), scale=(0.8, 1.2), translate=(0.1, 0.1), shear=0.15),
-        kornia.geometry.transform.Resize(256+30),
+        kornia.geometry.transform.Resize(256+10),
         K.RandomCrop((256,256)),
         K.RandomHorizontalFlip(),
     )
 
+    # trainA = ImageFolder(os.path.join("/data/dataset/crdata/CRDATA/", 'A_256'), train_transform)
+    # trainB = ImageFolder(os.path.join("/data/dataset/crdata/CRDATA/", 'B_256'), train_transform)
     trainA = ImageFolder(os.path.join("/data/dataset/crdata/CRDATA/", 'A_256'), train_transform)
-    trainB = ImageFolder(os.path.join("/data/dataset/crdata/CRDATA/", 'B_256'), train_transform)
+    trainA2 = ImageFolder(os.path.join("/data/dataset/selfie2anime/", 'trainA'), train_transform)
+    trainA3 = ImageFolder(os.path.join("/data/dataset/yellow", 'generated_yellow-stylegan2'), train_transform)
+    trainB = ImageFolder(os.path.join("/data/dataset/crdata/CRDATA/", 'B_512'), train_transform)
     testB = ImageFolder(os.path.join("/data/cairui/UGATIT-pytorch/dataset/selfie2anime", 'testB'), test_transform)
     testA = ImageFolder(os.path.join("/data/cairui/GANsNRoses/", 'testimg2'), test_transform)
 
     trainA_loader = data.DataLoader(trainA, batch_size=args.batch, 
             sampler=data_sampler(trainA, shuffle=True, distributed=args.distributed), drop_last=True, pin_memory=True, num_workers=3)
+    trainA2_loader = data.DataLoader(trainA2, batch_size=args.batch, 
+            sampler=data_sampler(trainA2, shuffle=True, distributed=args.distributed), drop_last=True, pin_memory=True, num_workers=3)
+    trainA3_loader = data.DataLoader(trainA3, batch_size=args.batch, 
+            sampler=data_sampler(trainA3, shuffle=True, distributed=args.distributed), drop_last=True, pin_memory=True, num_workers=3)
     trainB_loader = data.DataLoader(trainB, batch_size=args.batch, 
             sampler=data_sampler(trainB, shuffle=True, distributed=args.distributed), drop_last=True, pin_memory=True, num_workers=3)
 
     testA_loader = data.DataLoader(testA, batch_size=1, shuffle=False)
     testB_loader = data.DataLoader(testB, batch_size=1, shuffle=False)
 
-    train(args, trainA_loader, trainB_loader, testA_loader, testB_loader, G_A2B, D_B, G_optim, D_optim, device,T_Decoder,T_Encoder)
+    train(args, trainA_loader, trainA2_loader, trainA3_loader, trainB_loader, testA_loader, testB_loader, G_A2B, D_B, G_optim, D_optim, device,T_Decoder,T_Encoder)
     # with torch.no_grad():
     #    test(args, G_A2B, G_B2A, testA_loader, testB_loader, 'normal', 12244)
 
