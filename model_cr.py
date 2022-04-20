@@ -16,6 +16,8 @@ from crnet_small import CRDecoder_rose3, Decoder_kkk, Decoder_kkk2, Decoder_kkk5
 from mobilenetv3 import MobileNetV3_Mogai
 
 from DiffAugment import DiffAugment
+from tiny_generator import TinyGenerator
+from tiny_encoder import TinyEncoder
 
 
 channels = {
@@ -761,17 +763,21 @@ class Generator3(nn.Module):
 
         self.mapping = nn.Sequential(*mapping)
 
-        #self.encoder = Encoder(size, latent_dim, num_down, n_res, channel_multiplier)
-        self.encoder = MobileNetV3_Mogai()
+        # self.encoder = Encoder(size, latent_dim, num_down, n_res, channel_multiplier)
+        # self.encoder = MobileNetV3_Mogai()
+        self.encoder = TinyEncoder()
 
-        self.decoder = Decoder_kkk2()
+        # self.decoder = Decoder_kkk2()
+        self.decoder = TinyGenerator()
         # self.decoder = Decoder_kkk512()
 
     def style_encode(self, input):
         return self.encoder(input)[1]
 
     def encode(self, input):
-        return self.encoder(input)
+        out = self.encoder(input)
+        # print("----------22222222", out)
+        return out
 
     # def decode(self, input, styles, use_mapping=True):
     #     image, alpha, image512 = self.decoder(input, styles)
@@ -783,6 +789,7 @@ class Generator3(nn.Module):
 
     def forward(self, input, z=None):
         content, style = self.encode(input)
+        # print("----------1111111111", content)
         if z is None:
             out = self.decode(content, style)
         else:
